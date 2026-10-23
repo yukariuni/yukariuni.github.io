@@ -98,6 +98,46 @@ tabs.forEach((tab) => {
 const hash = location.hash.slice(1);
 selectTab(tabNames.includes(hash) ? hash : tabNames[0], false);
 
+// Discord status: the sidebar and the About panel show your live Discord status.
+// Setup: join https://discord.gg/UrXF2cfJ7F, then paste your Discord user ID between the quotes below.
+// (Discord settings → Advanced → Developer Mode on, then right-click your profile → Copy User ID.)
+const DISCORD_ID = "1501019083137618011";
+
+const STATUS_LABELS = { online: "Online", idle: "Idle", dnd: "Do not disturb", offline: "Offline" };
+const STATUS_COLORS = { online: "#4ade80", idle: "#facc15", dnd: "#f87171", offline: "#9ca3af" };
+
+const setStatusText = (text, color) => {
+  for (const el of document.querySelectorAll("[data-status-text]")) el.textContent = text;
+  for (const dot of document.querySelectorAll(".status-dot")) dot.style.background = color;
+};
+
+const showDiscordStatus = (data) => {
+  const state = data.discord_status in STATUS_LABELS ? data.discord_status : "offline";
+  // The custom status is the activity of type 4: its text and its emoji if it is a regular one
+  const custom = (data.activities || []).find((activity) => activity.type === 4);
+  const emoji = custom && custom.emoji && !custom.emoji.id ? custom.emoji.name : "";
+  const text = [emoji, custom && custom.state].filter(Boolean).join(" ") || STATUS_LABELS[state];
+  setStatusText(text, STATUS_COLORS[state]);
+};
+
+const loadDiscordStatus = async () => {
+  try {
+    const response = await fetch(`https://api.lanyard.rest/v1/users/${DISCORD_ID}`);
+    const json = await response.json();
+    if (!json.success) throw new Error("Discord status not available");
+    showDiscordStatus(json.data);
+  } catch {
+    setStatusText("Status unavailable", "#9ca3af");
+  }
+};
+
+if (DISCORD_ID) {
+  loadDiscordStatus();
+  setInterval(loadDiscordStatus, 30000);
+} else {
+  setStatusText("Status unavailable", "#9ca3af");
+}
+
 // Copy the Discord handle
 const copyBtn = $("copy-discord");
 const copyLabel = $("discord-label");
