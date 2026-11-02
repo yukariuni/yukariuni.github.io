@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
   <noscript><style>.gate { display: none; }</style></noscript>
 </head>
 <body>
@@ -165,8 +165,8 @@
               <input id="set-smooth" type="range" min="0" max="0.95" step="0.01" aria-label="Visualizer smoothing">
             </label>
             <label class="setting">
-              <span class="setting-head"><span>Sensitivity</span><span class="setting-val" id="set-sens-val"></span></span>
-              <input id="set-sens" type="range" min="0.5" max="2" step="0.05" aria-label="Visualizer sensitivity">
+              <span class="setting-head" title="How strongly the glow and the bass effects react"><span>Bass sens.</span><span class="setting-val" id="set-sens-val"></span></span>
+              <input id="set-sens" type="range" min="0.2" max="3" step="0.05" aria-label="Bass effects sensitivity">
             </label>
             <div class="setting">
               <span class="setting-head"><span>Color</span></span>
@@ -243,6 +243,6 @@
     </main>
   </div>
 
-  <script src="script.js?v=4"></script>
+  <script src="script.js?v=5"></script>
 </body>
 </html>

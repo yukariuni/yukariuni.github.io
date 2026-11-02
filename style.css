@@ -296,17 +296,6 @@ body {
   line-height: 1;
 }
 
-.panel:not([hidden]) {
-  animation: panel-in 0.5s var(--ease) backwards;
-}
-
-@keyframes panel-in {
-  from {
-    opacity: 0;
-    transform: translateX(14px);
-  }
-}
-
 /* About me */
 .facts {
   margin: 0;
@@ -1046,4 +1035,11 @@ body {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* While a point of the equalizer is dragged, the point replaces the mouse cursor */
+.is-dragging,
+.is-dragging * {
+  cursor: none !important;
+  user-select: none;
 }
