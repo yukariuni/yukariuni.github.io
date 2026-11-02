@@ -156,7 +156,11 @@ copyBtn.addEventListener("click", async () => {
 // Music player
 const audio = new Audio();
 audio.preload = "auto";
-audio.volume = 0.8;
+// Starting volume (0 to 1). The slider is curved (value squared), so 0.5 is a quiet, comfortable level.
+const DEFAULT_VOLUME = 0.5;
+let volume = DEFAULT_VOLUME;
+const volumeGain = () => volume * volume;
+audio.volume = volumeGain();
 let current = -1;
 let audioCtx = null;
 let analyser = null;
@@ -183,16 +187,70 @@ const vizCtx = vizCanvas.getContext("2d");
 const canVisualize = location.protocol === "http:" || location.protocol === "https:";
 if (!canVisualize) vizNote.textContent = "The visualizer works on the website, not when this file is opened directly.";
 
-const timeData = new Uint8Array(2048).fill(128);
-const freqData = new Uint8Array(1024);
+const timeData = new Uint8Array(4096).fill(128);
+const freqData = new Uint8Array(2048);
 
+// Equalizer: 5 bands, gains in dB
+const EQ_BANDS = [
+  { freq: 60, type: "lowshelf", label: "60 Hz" },
+  { freq: 230, type: "peaking", label: "230 Hz" },
+  { freq: 910, type: "peaking", label: "910 Hz" },
+  { freq: 3600, type: "peaking", label: "3.6 kHz" },
+  { freq: 14000, type: "highshelf", label: "14 kHz" },
+];
+const EQ_PRESETS = {
+  flat: [0, 0, 0, 0, 0],
+  bass: [6, 3, 0, -1, -1],
+  vocal: [-2, 0, 3, 3, -1],
+  treble: [-2, -1, 0, 3, 6],
+};
+const eqGains = EQ_BANDS.map(() => 0);
+let filters = [];
+let gainNode = null;
+
+const applyEq = () => filters.forEach((filter, i) => (filter.gain.value = eqGains[i]));
+
+// Chain: audio -> equalizer -> limiter -> analyser -> volume -> speakers
 const connectVisualizer = () => {
   if (!canVisualize || analyser) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = audioCtx.createMediaElementSource(audio);
+
+  filters = EQ_BANDS.map((band, i) => {
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = band.type;
+    filter.frequency.value = band.freq;
+    if (band.type === "peaking") filter.Q.value = 1;
+    filter.gain.value = eqGains[i];
+    return filter;
+  });
+
+  // Soft limiter so boosting a band never clips
+  const limiter = audioCtx.createDynamicsCompressor();
+  limiter.threshold.value = -6;
+  limiter.knee.value = 6;
+  limiter.ratio.value = 12;
+  limiter.attack.value = 0.003;
+  limiter.release.value = 0.25;
+
   analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 2048;
-  audioCtx.createMediaElementSource(audio).connect(analyser);
-  analyser.connect(audioCtx.destination);
+  analyser.fftSize = 4096;
+  analyser.smoothingTimeConstant = 0.8;
+  analyser.minDecibels = -90;
+  analyser.maxDecibels = -10; // the bass no longer hits the ceiling
+
+  gainNode = audioCtx.createGain();
+  audio.volume = 1;
+  gainNode.gain.value = volumeGain();
+
+  const chain = [source, ...filters, limiter, analyser, gainNode, audioCtx.destination];
+  for (let i = 0; i < chain.length - 1; i++) chain[i].connect(chain[i + 1]);
+};
+
+const setVolume = (value) => {
+  volume = value;
+  if (gainNode) gainNode.gain.value = volumeGain();
+  else audio.volume = volumeGain();
 };
 
 const resumeAudio = () => {
@@ -314,9 +372,10 @@ audio.addEventListener("timeupdate", () => {
 seekEl.addEventListener("input", () => {
   if (audio.duration) audio.currentTime = (seekEl.value / 100) * audio.duration;
 });
-volumeEl.addEventListener("input", () => (audio.volume = Number(volumeEl.value)));
+volumeEl.addEventListener("input", () => setVolume(Number(volumeEl.value)));
+volumeEl.value = String(DEFAULT_VOLUME);
 
-// Visualizer: waveform or spectrum, drawn in white
+// Visualizer: several modes, all drawn in white
 const modeButtons = [...document.querySelectorAll("[data-viz]")];
 for (const button of modeButtons) {
   button.addEventListener("click", () => {
@@ -325,10 +384,106 @@ for (const button of modeButtons) {
   });
 }
 
+// Turns the spectrum into n bars on a log scale. Each bar gets its own FFT bins (the bass used to share
+// the same bin, which made the first bars identical, and it hit the ceiling, which made them flat squares).
+const bandValues = new Float32Array(128);
+const getBands = (n) => {
+  const binHz = analyser ? audioCtx.sampleRate / analyser.fftSize : 10.77;
+  const minBin = Math.max(1, Math.round(30 / binHz));
+  const maxBin = Math.min(freqData.length - 1, Math.round(16000 / binHz));
+  let start = minBin;
+  for (let i = 0; i < n; i++) {
+    const edge = Math.round(minBin * (maxBin / minBin) ** ((i + 1) / n));
+    const end = Math.min(freqData.length, Math.max(start + 1, edge));
+    let peak = 0;
+    for (let b = start; b < end; b++) if (freqData[b] > peak) peak = freqData[b];
+    start = Math.min(end, freqData.length - 1);
+    const tilt = 0.8 + 0.4 * (i / n); // the bass is naturally louder, so it is lowered a little
+    bandValues[i] = Math.min(1, (peak / 255) ** 1.4 * tilt);
+  }
+  return bandValues;
+};
+
+const drawSpectrum = (w, h) => {
+  const bars = Math.min(64, Math.floor(w / 10));
+  const values = getBands(bars);
+  const barWidth = w / bars;
+  for (let i = 0; i < bars; i++) {
+    const barHeight = Math.max(2, values[i] * h);
+    vizCtx.fillStyle = `rgba(255, 255, 255, ${0.3 + values[i] * 0.7})`;
+    vizCtx.fillRect(i * barWidth + 1, h - barHeight, Math.max(1, barWidth - 3), barHeight);
+  }
+};
+
+const drawMirror = (w, h) => {
+  const bars = Math.min(64, Math.floor(w / 10));
+  const values = getBands(bars);
+  const barWidth = w / bars;
+  for (let i = 0; i < bars; i++) {
+    const barHeight = Math.max(2, values[i] * h * 0.92);
+    vizCtx.fillStyle = `rgba(255, 255, 255, ${0.3 + values[i] * 0.7})`;
+    vizCtx.fillRect(i * barWidth + 1, (h - barHeight) / 2, Math.max(1, barWidth - 3), barHeight);
+  }
+};
+
+const drawArea = (w, h) => {
+  const count = 48;
+  const values = getBands(count);
+  const step = w / (count - 1);
+  const pts = Array.from({ length: count }, (_, i) => [i * step, h - Math.max(2, values[i] * h * 0.95)]);
+  vizCtx.beginPath();
+  vizCtx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < count; i++) {
+    const [px, py] = pts[i - 1];
+    const [cx, cy] = pts[i];
+    vizCtx.quadraticCurveTo(px, py, (px + cx) / 2, (py + cy) / 2);
+  }
+  vizCtx.lineTo(w, pts[count - 1][1]);
+  vizCtx.lineWidth = 2;
+  vizCtx.stroke();
+  vizCtx.lineTo(w, h);
+  vizCtx.lineTo(0, h);
+  vizCtx.closePath();
+  const fade = vizCtx.createLinearGradient(0, 0, 0, h);
+  fade.addColorStop(0, "rgba(255, 255, 255, 0.5)");
+  fade.addColorStop(1, "rgba(255, 255, 255, 0.02)");
+  vizCtx.fillStyle = fade;
+  vizCtx.fill();
+};
+
+const drawRadial = (w, h) => {
+  const half = 48;
+  const total = half * 2;
+  const values = getBands(half);
+  const size = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h / 2;
+  const base = size * 0.2;
+  const reach = size * 0.26;
+  vizCtx.lineWidth = 2.5;
+  vizCtx.lineCap = "round";
+  vizCtx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+  vizCtx.beginPath();
+  vizCtx.arc(cx, cy, base - 4, 0, Math.PI * 2);
+  vizCtx.stroke();
+  for (let i = 0; i < total; i++) {
+    const value = values[i < half ? i : total - 1 - i]; // mirrored, so the circle is symmetric
+    const angle = (i / total) * Math.PI * 2 - Math.PI / 2;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const length = 2 + value * reach;
+    vizCtx.strokeStyle = `rgba(255, 255, 255, ${0.3 + value * 0.7})`;
+    vizCtx.beginPath();
+    vizCtx.moveTo(cx + cos * base, cy + sin * base);
+    vizCtx.lineTo(cx + cos * (base + length), cy + sin * (base + length));
+    vizCtx.stroke();
+  }
+};
+
 const drawWaveform = (w, h) => {
   vizCtx.lineWidth = 2;
   vizCtx.beginPath();
-  for (let i = 0; i < timeData.length; i++) {
+  for (let i = 0; i < timeData.length; i += 2) {
     const x = (i / (timeData.length - 1)) * w;
     const y = (timeData[i] / 255) * h;
     if (i === 0) vizCtx.moveTo(x, y);
@@ -337,18 +492,7 @@ const drawWaveform = (w, h) => {
   vizCtx.stroke();
 };
 
-const drawSpectrum = (w, h) => {
-  const bars = Math.min(72, Math.floor(w / 9));
-  const barWidth = w / bars;
-  for (let i = 0; i < bars; i++) {
-    // Logarithmic spacing, so low and high frequencies both get room
-    const index = Math.min(freqData.length - 1, Math.floor(freqData.length ** (i / bars)));
-    const value = freqData[index] / 255;
-    const barHeight = Math.max(2, value * h);
-    vizCtx.fillStyle = `rgba(255, 255, 255, ${0.3 + value * 0.7})`;
-    vizCtx.fillRect(i * barWidth + 1, h - barHeight, Math.max(1, barWidth - 3), barHeight);
-  }
-};
+const VIZ_DRAWERS = { spectrum: drawSpectrum, mirror: drawMirror, area: drawArea, radial: drawRadial, waveform: drawWaveform };
 
 const drawVisualizer = () => {
   requestAnimationFrame(drawVisualizer);
@@ -368,10 +512,62 @@ const drawVisualizer = () => {
   vizCtx.clearRect(0, 0, w, h);
   vizCtx.fillStyle = "#fff";
   vizCtx.strokeStyle = "#fff";
-  if (vizMode === "waveform") drawWaveform(w, h);
-  else drawSpectrum(w, h);
+  (VIZ_DRAWERS[vizMode] || drawSpectrum)(w, h);
 };
 requestAnimationFrame(drawVisualizer);
+
+// Equalizer interface: one slider per band, plus presets
+const eqBox = $("eq-bands");
+const eqSliders = [];
+const eqLabels = [];
+const presetButtons = [...document.querySelectorAll("[data-preset]")];
+if (!canVisualize) $("eq-note").textContent = "The equalizer works on the website, not when this file is opened directly.";
+
+const showEq = () => {
+  eqSliders.forEach((slider, i) => {
+    slider.value = String(eqGains[i]);
+    eqLabels[i].textContent = `${eqGains[i] > 0 ? "+" : ""}${eqGains[i]} dB`;
+  });
+};
+
+EQ_BANDS.forEach((band, i) => {
+  const row = createNode("label", "eq-band");
+  const head = createNode("span", "eq-head");
+  const value = createNode("span", "eq-val", "0 dB");
+  head.append(createNode("span", "eq-freq", band.label), value);
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "-12";
+  slider.max = "12";
+  slider.step = "0.5";
+  slider.value = "0";
+  slider.disabled = !canVisualize;
+  slider.setAttribute("aria-label", `${band.label} gain`);
+  slider.addEventListener("input", () => {
+    eqGains[i] = Number(slider.value);
+    showEq();
+    applyEq();
+    for (const button of presetButtons) button.setAttribute("aria-pressed", "false");
+  });
+  slider.addEventListener("dblclick", () => {
+    slider.value = "0";
+    slider.dispatchEvent(new Event("input"));
+  });
+  eqSliders.push(slider);
+  eqLabels.push(value);
+  row.append(head, slider);
+  eqBox.append(row);
+});
+
+for (const button of presetButtons) {
+  button.disabled = !canVisualize;
+  button.addEventListener("click", () => {
+    EQ_PRESETS[button.dataset.preset].forEach((gain, i) => (eqGains[i] = gain));
+    showEq();
+    applyEq();
+    for (const other of presetButtons) other.setAttribute("aria-pressed", String(other === button));
+  });
+}
 
 // Start the player in its initial state
 renderPlaylist();

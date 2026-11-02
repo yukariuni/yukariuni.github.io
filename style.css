@@ -184,6 +184,11 @@ body {
   }
 }
 
+/* Profile: no animation on the avatar block */
+.profile .status-dot {
+  animation: none;
+}
+
 /* Category tabs: stacked with no gap, so they touch each other */
 .tabs {
   display: flex;
@@ -332,7 +337,7 @@ body {
 .copy-btn svg {
   width: 16px;
   height: 16px;
-  color: #5865f2;
+  color: currentColor;
 }
 
 /* Links */
@@ -360,8 +365,8 @@ body {
   flex: none;
   width: 48px;
   height: 48px;
-  background: var(--brand);
-  color: #fff;
+  background: var(--text);
+  color: var(--bg);
 }
 
 .chip svg {
@@ -421,11 +426,12 @@ body {
 
 .viz-modes {
   display: flex;
+  flex-wrap: wrap;
   margin-left: auto;
 }
 
 .mode {
-  padding: 8px 14px;
+  padding: 8px 12px;
   border: 1px solid var(--line-strong);
   background: transparent;
   color: var(--muted);
@@ -727,6 +733,54 @@ body {
   padding: 16px 12px;
   border-bottom: 1px solid var(--line);
   color: var(--muted);
+}
+
+/* Equalizer */
+.eq-title {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.eq-bands {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.eq-band {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.eq-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  font-variant-numeric: tabular-nums;
+}
+
+.eq-freq {
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.eq-band input {
+  width: 100%;
+  margin: 0;
+  accent-color: #fff;
+}
+
+.eq-band input:disabled {
+  opacity: 0.4;
 }
 
 .footer {
