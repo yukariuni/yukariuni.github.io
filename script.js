@@ -3,6 +3,7 @@
 // { title: "Song name", artist: "yukariuni", src: "assets/music/song.mp3", cover: "assets/music/song.webp" },
 const TRACKS = [
   { title: "Ecifircas", artist: "Sewerslvt", src: "assets/music/ecifircas.mp3", cover: "assets/music/ecifircas.webp" },
+  { title: "Goodbye", artist: "Sewerslvt", src: "assets/music/goodbye.wav", cover: "assets/music/goodbye.jpg" },
 ];
 
 const $ = (id) => document.getElementById(id);
