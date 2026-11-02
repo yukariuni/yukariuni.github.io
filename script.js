@@ -3,7 +3,6 @@
 // { title: "Song name", artist: "yukariuni", src: "assets/music/song.mp3", cover: "assets/music/song.webp" },
 const TRACKS = [
   { title: "Ecifircas", artist: "Sewerslvt", src: "assets/music/ecifircas.mp3", cover: "assets/music/ecifircas.webp" },
-  { title: "Goodbye", artist: "Sewerslvt", src: "assets/music/goodbye.mp3", cover: "assets/music/goodbye.webp" },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -691,12 +690,16 @@ bindChecks();
 colorInput.addEventListener("input", () => setAccent(colorInput.value, { duration: 260 }));
 
 // ---------- Visualizer modes ----------
-const VIZ_MODE_NAMES = ["spectrum", "mirror", "area", "radial", "waveform"];
+const VIZ_MODE_NAMES = ["spectrum", "mirror", "area", "radial", "3d", "waveform"];
 if (!VIZ_MODE_NAMES.includes(settings.mode)) settings.mode = "spectrum";
 vizMode = settings.mode;
 const modeButtons = [...document.querySelectorAll("[data-viz]")];
+const FILE_NOTE = "The visualizer works on the website, not when this file is opened directly.";
+const HINT_3D = "Drag to rotate · Shift+drag or two fingers to stretch · scroll to zoom · it springs back";
 const showMode = () => {
   for (const button of modeButtons) button.setAttribute("aria-pressed", String(button.dataset.viz === vizMode));
+  vizCanvas.classList.toggle("is-3d", vizMode === "3d");
+  vizNote.textContent = !canVisualize ? FILE_NOTE : vizMode === "3d" ? HINT_3D : "";
 };
 for (const button of modeButtons) {
   button.addEventListener("click", () => {
@@ -909,7 +912,198 @@ const drawWaveform = (w, h) => {
   vizCtx.stroke();
 };
 
-const VIZ_DRAWERS = { spectrum: drawSpectrum, mirror: drawMirror, area: drawArea, radial: drawRadial, waveform: drawWaveform };
+// ---------- 3D mode: a landscape of the last moments of the spectrum ----------
+// Drag = rotate, Shift+drag (or right-drag, or two fingers) = stretch, scroll = zoom.
+// Everything springs back to its resting position when you let go.
+const GRID_COLS = 56;
+const GRID_ROWS = 30;
+const grid = Array.from({ length: GRID_ROWS }, () => new Float32Array(GRID_COLS));
+let gridHead = 0;
+let rowClock = 0;
+let frameDt = 0;
+
+const view = { yaw: 0.55, pitch: 0.62, sx: 1, sy: 1, zoom: 1 };
+const REST = { ...view };
+const viewVel = { yaw: 0, pitch: 0, sx: 0, sy: 0, zoom: 0 };
+let holdUntil = 0; // the view stays where you left it until this time, then springs back
+
+const stepView = (dt) => {
+  if (performance.now() < holdUntil) return;
+  const stiffness = 70;
+  const damping = 10; // a little bounce on the way back
+  for (const key of Object.keys(view)) {
+    viewVel[key] += ((REST[key] - view[key]) * stiffness - viewVel[key] * damping) * dt;
+    view[key] += viewVel[key] * dt;
+  }
+};
+
+const draw3D = (w, h) => {
+  stepView(Math.min(frameDt, 0.04));
+
+  // A new row of the landscape at a pace set by Speed
+  rowClock += frameDt;
+  const interval = 0.13 - 0.11 * settings.speed;
+  while (rowClock >= interval) {
+    rowClock -= interval;
+    gridHead = (gridHead + 1) % GRID_ROWS;
+    grid[gridHead].set(bandsFor(GRID_COLS).subarray(0, GRID_COLS));
+  }
+
+  const yaw = view.yaw + Math.sin(performance.now() * 0.0004) * 0.1; // a slow idle sway
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const cosP = Math.cos(view.pitch);
+  const sinP = Math.sin(view.pitch);
+  const unit = Math.min(w * 0.27, h * 0.6) * view.zoom * (1 + bassLevel * 0.04);
+  const camera = 4.2;
+  const cx = w / 2;
+  const cy = h * 0.6;
+  const half = 1.8 * view.sx;
+
+  // [screen x, screen y, depth]
+  const project = (x, y, z) => {
+    const x1 = x * cosY + z * sinY;
+    const z1 = -x * sinY + z * cosY;
+    const y1 = y * cosP - z1 * sinP;
+    const z2 = y * sinP + z1 * cosP;
+    const scale = camera / Math.max(0.5, camera - z2);
+    return [cx + x1 * unit * scale, cy - y1 * unit * scale, z2];
+  };
+
+  // Floor outline
+  vizCtx.lineWidth = 1;
+  vizCtx.strokeStyle = rgba(0.18);
+  vizCtx.beginPath();
+  [[-half, -1], [half, -1], [half, 1], [-half, 1]].forEach(([x, z], i) => {
+    const [px, py] = project(x, 0, z);
+    if (i === 0) vizCtx.moveTo(px, py);
+    else vizCtx.lineTo(px, py);
+  });
+  vizCtx.closePath();
+  vizCtx.stroke();
+
+  // Rows from the farthest to the nearest, each one hiding what is behind it
+  const rows = [];
+  for (let age = 0; age < GRID_ROWS; age++) {
+    const z = 1 - (age / (GRID_ROWS - 1)) * 2; // the newest row is at the front
+    rows.push({ age, z, depth: project(0, 0, z)[2] });
+  }
+  rows.sort((a, b) => a.depth - b.depth);
+
+  const tops = new Array(GRID_COLS);
+  const bases = new Array(GRID_COLS);
+  for (const row of rows) {
+    const values = grid[(gridHead - row.age + GRID_ROWS) % GRID_ROWS];
+    for (let i = 0; i < GRID_COLS; i++) {
+      const x = (i / (GRID_COLS - 1) * 2 - 1) * half;
+      tops[i] = project(x, values[i] * 1.15 * view.sy * (1 + bassLevel * 0.12), row.z);
+      bases[i] = project(x, 0, row.z);
+    }
+    vizCtx.beginPath();
+    vizCtx.moveTo(tops[0][0], tops[0][1]);
+    for (let i = 1; i < GRID_COLS; i++) vizCtx.lineTo(tops[i][0], tops[i][1]);
+    for (let i = GRID_COLS - 1; i >= 0; i--) vizCtx.lineTo(bases[i][0], bases[i][1]);
+    vizCtx.closePath();
+    vizCtx.fillStyle = "rgba(7, 7, 10, 0.92)";
+    vizCtx.fill();
+    const fade = (1 - row.age / GRID_ROWS) ** 1.3;
+    vizCtx.fillStyle = rgba(0.03 + fade * 0.07);
+    vizCtx.fill();
+
+    vizCtx.beginPath();
+    vizCtx.moveTo(tops[0][0], tops[0][1]);
+    for (let i = 1; i < GRID_COLS; i++) vizCtx.lineTo(tops[i][0], tops[i][1]);
+    vizCtx.lineWidth = row.age === 0 ? 2 : 1.3;
+    vizCtx.strokeStyle = rgba(0.15 + fade * 0.85);
+    vizCtx.stroke();
+  }
+};
+
+// Grabbing the view
+const touches = new Map();
+let pinchSpan = null;
+let flick = { yaw: 0, pitch: 0, time: 0 };
+let lastMoveTime = 0;
+const is3D = () => vizMode === "3d";
+const spanOf = () => {
+  const [a, b] = [...touches.values()];
+  return { x: Math.abs(a.x - b.x), y: Math.abs(a.y - b.y) };
+};
+
+vizCanvas.addEventListener("pointerdown", (event) => {
+  if (!is3D()) return;
+  vizCanvas.setPointerCapture(event.pointerId);
+  touches.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  holdUntil = Infinity;
+  for (const key of Object.keys(viewVel)) viewVel[key] = 0;
+  vizCanvas.classList.add("is-grabbing");
+  pinchSpan = touches.size === 2 ? spanOf() : null;
+  lastMoveTime = performance.now();
+});
+
+vizCanvas.addEventListener("pointermove", (event) => {
+  const point = touches.get(event.pointerId);
+  if (!point || !is3D()) return;
+  const dx = event.clientX - point.x;
+  const dy = event.clientY - point.y;
+  point.x = event.clientX;
+  point.y = event.clientY;
+  const now = performance.now();
+
+  if (touches.size >= 2) {
+    // Two fingers: spreading sideways stretches the width, spreading up and down stretches the height
+    const span = spanOf();
+    if (pinchSpan) {
+      view.sx = clamp(view.sx * ((span.x + 30) / (pinchSpan.x + 30)), 0.35, 2.8);
+      view.sy = clamp(view.sy * ((span.y + 30) / (pinchSpan.y + 30)), 0.25, 3.2);
+    }
+    pinchSpan = span;
+  } else if (event.shiftKey || (event.buttons & 2)) {
+    view.sx = clamp(view.sx * Math.exp(dx * 0.006), 0.35, 2.8);
+    view.sy = clamp(view.sy * Math.exp(-dy * 0.006), 0.25, 3.2);
+  } else {
+    view.yaw += dx * 0.01;
+    view.pitch = clamp(view.pitch + dy * 0.01, -0.3, 1.5);
+    const elapsed = Math.max(0.008, (now - lastMoveTime) / 1000);
+    flick = { yaw: clamp((dx * 0.01) / elapsed, -7, 7), pitch: clamp((dy * 0.01) / elapsed, -7, 7), time: now };
+  }
+  lastMoveTime = now;
+});
+
+const releaseView = (event) => {
+  if (!touches.delete(event.pointerId)) return;
+  pinchSpan = null;
+  if (touches.size > 0) return;
+  vizCanvas.classList.remove("is-grabbing");
+  holdUntil = 0;
+  // A quick flick keeps its momentum for a moment, then the spring brings the view back
+  if (performance.now() - flick.time < 80) {
+    viewVel.yaw = flick.yaw;
+    viewVel.pitch = flick.pitch;
+  }
+  flick = { yaw: 0, pitch: 0, time: 0 };
+};
+vizCanvas.addEventListener("pointerup", releaseView);
+vizCanvas.addEventListener("pointercancel", releaseView);
+vizCanvas.addEventListener("contextmenu", (event) => {
+  if (is3D()) event.preventDefault();
+});
+vizCanvas.addEventListener(
+  "wheel",
+  (event) => {
+    if (!is3D()) return;
+    event.preventDefault();
+    const amount = Math.exp(-(event.deltaY || event.deltaX) * 0.0015);
+    if (event.shiftKey) view.sy = clamp(view.sy * amount, 0.25, 3.2);
+    else view.zoom = clamp(view.zoom * amount, 0.5, 2.4);
+    viewVel.zoom = 0;
+    viewVel.sy = 0;
+    holdUntil = performance.now() + 450;
+  },
+  { passive: false }
+);
+
+const VIZ_DRAWERS = { spectrum: drawSpectrum, mirror: drawMirror, area: drawArea, radial: drawRadial, "3d": draw3D, waveform: drawWaveform };
 
 let lastFrame = performance.now();
 const drawVisualizer = (now = performance.now()) => {
@@ -923,6 +1117,7 @@ const drawVisualizer = (now = performance.now()) => {
     analyser.getByteFrequencyData(freqData);
   }
   if (eqAnalyser) eqAnalyser.getByteFrequencyData(eqFreqData);
+  frameDt = dt;
   updateBands(dt);
   updateWave(dt);
   colorFlash = Math.max(0, colorFlash - dt * 1.1);
