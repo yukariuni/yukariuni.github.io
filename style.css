@@ -476,21 +476,6 @@ body {
   box-shadow: 0 0 calc(var(--bass) * 46px) rgba(var(--accent-rgb), calc(var(--bass) * 0.55));
 }
 
-/* 3D mode: taller, and you can grab it */
-.viz {
-  transition: height 0.5s var(--ease);
-}
-
-.viz.is-3d {
-  height: 340px;
-  cursor: grab;
-  touch-action: none;
-}
-
-.viz.is-3d.is-grabbing {
-  cursor: grabbing;
-}
-
 .viz-settings {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
