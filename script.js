@@ -190,13 +190,13 @@ if (!canVisualize) vizNote.textContent = "The visualizer works on the website, n
 const timeData = new Uint8Array(4096).fill(128);
 const freqData = new Uint8Array(2048);
 
-// Equalizer: 5 bands, gains in dB
-const EQ_BANDS = [
-  { freq: 60, type: "lowshelf", label: "60 Hz" },
-  { freq: 230, type: "peaking", label: "230 Hz" },
-  { freq: 910, type: "peaking", label: "910 Hz" },
-  { freq: 3600, type: "peaking", label: "3.6 kHz" },
-  { freq: 14000, type: "highshelf", label: "14 kHz" },
+// Parametric equalizer: 5 bands, each with a type, a frequency, a gain (dB) and a Q
+const EQ_DEFAULTS = [
+  { type: "lowshelf", freq: 80, gain: 0, q: 0.7 },
+  { type: "peaking", freq: 250, gain: 0, q: 1 },
+  { type: "peaking", freq: 1000, gain: 0, q: 1 },
+  { type: "peaking", freq: 4000, gain: 0, q: 1 },
+  { type: "highshelf", freq: 12000, gain: 0, q: 0.7 },
 ];
 const EQ_PRESETS = {
   flat: [0, 0, 0, 0, 0],
@@ -204,11 +204,25 @@ const EQ_PRESETS = {
   vocal: [-2, 0, 3, 3, -1],
   treble: [-2, -1, 0, 3, 6],
 };
-const eqGains = EQ_BANDS.map(() => 0);
+const EQ_TYPES = { lowshelf: "Low shelf", peaking: "Peak", highshelf: "High shelf" };
+const EQ_MIN_HZ = 20;
+const EQ_MAX_HZ = 20000;
+const EQ_RANGE = 15; // dB, up and down
+const eqBands = EQ_DEFAULTS.map((band) => ({ ...band }));
 let filters = [];
 let gainNode = null;
 
-const applyEq = () => filters.forEach((filter, i) => (filter.gain.value = eqGains[i]));
+const applyEq = () => {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  filters.forEach((filter, i) => {
+    const band = eqBands[i];
+    if (filter.type !== band.type) filter.type = band.type;
+    filter.frequency.setTargetAtTime(band.freq, now, 0.01);
+    filter.gain.setTargetAtTime(band.gain, now, 0.01);
+    filter.Q.setTargetAtTime(band.q, now, 0.01);
+  });
+};
 
 // Chain: audio -> equalizer -> limiter -> analyser -> volume -> speakers
 const connectVisualizer = () => {
@@ -216,14 +230,8 @@ const connectVisualizer = () => {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const source = audioCtx.createMediaElementSource(audio);
 
-  filters = EQ_BANDS.map((band, i) => {
-    const filter = audioCtx.createBiquadFilter();
-    filter.type = band.type;
-    filter.frequency.value = band.freq;
-    if (band.type === "peaking") filter.Q.value = 1;
-    filter.gain.value = eqGains[i];
-    return filter;
-  });
+  filters = eqBands.map(() => audioCtx.createBiquadFilter());
+  applyEq();
 
   // Soft limiter so boosting a band never clips
   const limiter = audioCtx.createDynamicsCompressor();
@@ -516,58 +524,314 @@ const drawVisualizer = () => {
 };
 requestAnimationFrame(drawVisualizer);
 
-// Equalizer interface: one slider per band, plus presets
+// Parametric equalizer interface: a curve with draggable points, plus exact controls for every band
+const eqCanvas = $("eq-curve");
+const eqCtx = eqCanvas.getContext("2d");
 const eqBox = $("eq-bands");
-const eqSliders = [];
-const eqLabels = [];
 const presetButtons = [...document.querySelectorAll("[data-preset]")];
-if (!canVisualize) $("eq-note").textContent = "The equalizer works on the website, not when this file is opened directly.";
+$("eq-note").textContent = canVisualize
+  ? "Drag a point · scroll on it for Q · double-click to reset"
+  : "The equalizer works on the website, not when this file is opened directly.";
+
+const hzToPos = (hz) => Math.log(hz / EQ_MIN_HZ) / Math.log(EQ_MAX_HZ / EQ_MIN_HZ);
+const posToHz = (pos) => EQ_MIN_HZ * (EQ_MAX_HZ / EQ_MIN_HZ) ** pos;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const formatHz = (hz) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2).replace(/\.?0+$/, "")} kHz` : `${Math.round(hz)} Hz`);
+const formatDb = (db) => `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
+
+// Filter maths (RBJ cookbook), used to draw the response curve without needing the audio engine
+const biquadCoeffs = (band) => {
+  const A = 10 ** (band.gain / 40);
+  const w0 = (2 * Math.PI * band.freq) / 48000;
+  const cos = Math.cos(w0);
+  const sin = Math.sin(w0);
+  if (band.type === "peaking") {
+    const alpha = sin / (2 * band.q);
+    return [1 + alpha * A, -2 * cos, 1 - alpha * A, 1 + alpha / A, -2 * cos, 1 - alpha / A];
+  }
+  const k = 2 * Math.sqrt(A) * (sin / Math.SQRT2);
+  if (band.type === "lowshelf") {
+    return [
+      A * (A + 1 - (A - 1) * cos + k),
+      2 * A * (A - 1 - (A + 1) * cos),
+      A * (A + 1 - (A - 1) * cos - k),
+      A + 1 + (A - 1) * cos + k,
+      -2 * (A - 1 + (A + 1) * cos),
+      A + 1 + (A - 1) * cos - k,
+    ];
+  }
+  return [
+    A * (A + 1 + (A - 1) * cos + k),
+    -2 * A * (A - 1 + (A + 1) * cos),
+    A * (A + 1 + (A - 1) * cos - k),
+    A + 1 - (A - 1) * cos + k,
+    2 * (A - 1 - (A + 1) * cos),
+    A + 1 - (A - 1) * cos - k,
+  ];
+};
+
+const coeffsDb = ([b0, b1, b2, a0, a1, a2], hz) => {
+  const w = (2 * Math.PI * hz) / 48000;
+  const c1 = Math.cos(w);
+  const c2 = Math.cos(2 * w);
+  const num = b0 * b0 + b1 * b1 + b2 * b2 + 2 * (b0 * b1 + b1 * b2) * c1 + 2 * b0 * b2 * c2;
+  const den = a0 * a0 + a1 * a1 + a2 * a2 + 2 * (a0 * a1 + a1 * a2) * c1 + 2 * a0 * a2 * c2;
+  return 10 * Math.log10(Math.max(1e-12, num) / Math.max(1e-12, den));
+};
+
+// Controls under the curve
+const ui = [];
+let eqActive = -1;
+const unpressPresets = () => presetButtons.forEach((button) => button.setAttribute("aria-pressed", "false"));
+const setActive = (index) => {
+  eqActive = index;
+  ui.forEach((entry, i) => entry.card.classList.toggle("is-active", i === index));
+};
 
 const showEq = () => {
-  eqSliders.forEach((slider, i) => {
-    slider.value = String(eqGains[i]);
-    eqLabels[i].textContent = `${eqGains[i] > 0 ? "+" : ""}${eqGains[i]} dB`;
+  eqBands.forEach((band, i) => {
+    const entry = ui[i];
+    entry.select.value = band.type;
+    entry.freq.input.value = String(Math.round(hzToPos(band.freq) * 1000));
+    entry.freq.value.textContent = formatHz(band.freq);
+    entry.gain.input.value = String(band.gain);
+    entry.gain.value.textContent = formatDb(band.gain);
+    entry.q.input.value = String(band.q);
+    entry.q.value.textContent = band.q.toFixed(2);
+    entry.q.input.disabled = !canVisualize || band.type !== "peaking"; // shelves have no Q
   });
 };
 
-EQ_BANDS.forEach((band, i) => {
-  const row = createNode("label", "eq-band");
-  const head = createNode("span", "eq-head");
-  const value = createNode("span", "eq-val", "0 dB");
-  head.append(createNode("span", "eq-freq", band.label), value);
-  const slider = document.createElement("input");
-  slider.type = "range";
-  slider.min = "-12";
-  slider.max = "12";
-  slider.step = "0.5";
-  slider.value = "0";
-  slider.disabled = !canVisualize;
-  slider.setAttribute("aria-label", `${band.label} gain`);
-  slider.addEventListener("input", () => {
-    eqGains[i] = Number(slider.value);
-    showEq();
-    applyEq();
-    for (const button of presetButtons) button.setAttribute("aria-pressed", "false");
+const eqChanged = () => {
+  showEq();
+  applyEq();
+  unpressPresets();
+};
+
+const makeParam = (name, min, max, step, onInput) => {
+  const wrap = createNode("label", "eq-param");
+  const head = createNode("span", "eq-param-head");
+  const value = createNode("span", "eq-val");
+  head.append(createNode("span", "", name), value);
+  const input = document.createElement("input");
+  input.type = "range";
+  input.min = String(min);
+  input.max = String(max);
+  input.step = String(step);
+  input.disabled = !canVisualize;
+  input.setAttribute("aria-label", name);
+  input.addEventListener("input", () => onInput(Number(input.value)));
+  wrap.append(head, input);
+  return { wrap, input, value };
+};
+
+eqBands.forEach((band, i) => {
+  const card = createNode("div", "eq-band");
+  const head = createNode("div", "eq-head");
+  const select = document.createElement("select");
+  select.className = "eq-select";
+  select.disabled = !canVisualize;
+  select.setAttribute("aria-label", `Band ${i + 1} type`);
+  for (const [type, label] of Object.entries(EQ_TYPES)) select.append(new Option(label, type));
+  select.addEventListener("change", () => {
+    band.type = select.value;
+    eqChanged();
   });
-  slider.addEventListener("dblclick", () => {
-    slider.value = "0";
-    slider.dispatchEvent(new Event("input"));
+  head.append(createNode("span", "eq-name", `Band ${i + 1}`), select);
+
+  const freq = makeParam("Frequency", 0, 1000, 1, (v) => {
+    band.freq = Math.round(posToHz(v / 1000));
+    eqChanged();
   });
-  eqSliders.push(slider);
-  eqLabels.push(value);
-  row.append(head, slider);
-  eqBox.append(row);
+  const gain = makeParam("Gain", -EQ_RANGE, EQ_RANGE, 0.5, (v) => {
+    band.gain = v;
+    eqChanged();
+  });
+  const q = makeParam("Q", 0.2, 10, 0.1, (v) => {
+    band.q = v;
+    eqChanged();
+  });
+
+  card.append(head, freq.wrap, gain.wrap, q.wrap);
+  card.addEventListener("pointerenter", () => setActive(i));
+  card.addEventListener("focusin", () => setActive(i));
+  eqBox.append(card);
+  ui.push({ card, select, freq, gain, q });
 });
 
 for (const button of presetButtons) {
   button.disabled = !canVisualize;
   button.addEventListener("click", () => {
-    EQ_PRESETS[button.dataset.preset].forEach((gain, i) => (eqGains[i] = gain));
+    eqBands.forEach((band, i) => Object.assign(band, EQ_DEFAULTS[i], { gain: EQ_PRESETS[button.dataset.preset][i] }));
     showEq();
     applyEq();
     for (const other of presetButtons) other.setAttribute("aria-pressed", String(other === button));
   });
 }
+showEq();
+
+// Curve: drag a point = frequency and gain, scroll on it = Q, double-click = reset its gain
+const GRID_HZ = [50, 100, 200, 500, 1000, 2000, 5000, 10000];
+const eqPad = 14;
+const eqX = (hz, w) => hzToPos(hz) * w;
+const eqY = (db, h) => h / 2 - (db / EQ_RANGE) * (h / 2 - eqPad);
+
+const eqPointAt = (px, py, radius) => {
+  const w = eqCanvas.clientWidth;
+  const h = eqCanvas.clientHeight;
+  let best = -1;
+  let bestDistance = radius;
+  eqBands.forEach((band, i) => {
+    const distance = Math.hypot(px - eqX(band.freq, w), py - eqY(band.gain, h));
+    if (distance <= bestDistance) {
+      best = i;
+      bestDistance = distance;
+    }
+  });
+  return best;
+};
+
+const eqLocal = (event) => {
+  const rect = eqCanvas.getBoundingClientRect();
+  return [event.clientX - rect.left, event.clientY - rect.top];
+};
+
+let dragging = -1;
+eqCanvas.addEventListener("pointerdown", (event) => {
+  if (!canVisualize) return;
+  const [px, py] = eqLocal(event);
+  const index = eqPointAt(px, py, 20);
+  if (index < 0) return;
+  dragging = index;
+  setActive(index);
+  eqCanvas.setPointerCapture(event.pointerId);
+});
+eqCanvas.addEventListener("pointermove", (event) => {
+  const [px, py] = eqLocal(event);
+  if (dragging < 0) {
+    eqCanvas.style.cursor = canVisualize && eqPointAt(px, py, 20) >= 0 ? "grab" : "default";
+    return;
+  }
+  const w = eqCanvas.clientWidth;
+  const h = eqCanvas.clientHeight;
+  const band = eqBands[dragging];
+  band.freq = Math.round(posToHz(clamp(px / w, 0, 1)));
+  band.gain = Math.round(clamp(((h / 2 - py) / (h / 2 - eqPad)) * EQ_RANGE, -EQ_RANGE, EQ_RANGE) * 2) / 2;
+  eqChanged();
+});
+const endDrag = () => (dragging = -1);
+eqCanvas.addEventListener("pointerup", endDrag);
+eqCanvas.addEventListener("pointercancel", endDrag);
+eqCanvas.addEventListener("dblclick", (event) => {
+  if (!canVisualize) return;
+  const [px, py] = eqLocal(event);
+  const index = eqPointAt(px, py, 20);
+  if (index < 0) return;
+  eqBands[index].gain = 0;
+  eqChanged();
+});
+eqCanvas.addEventListener(
+  "wheel",
+  (event) => {
+    if (!canVisualize) return;
+    const [px, py] = eqLocal(event);
+    const index = eqPointAt(px, py, 26);
+    if (index < 0 || eqBands[index].type !== "peaking") return;
+    event.preventDefault();
+    setActive(index);
+    eqBands[index].q = Math.round(clamp(eqBands[index].q * (event.deltaY < 0 ? 1.1 : 1 / 1.1), 0.2, 10) * 100) / 100;
+    eqChanged();
+  },
+  { passive: false }
+);
+
+const drawEq = () => {
+  requestAnimationFrame(drawEq);
+  const ratio = window.devicePixelRatio || 1;
+  const w = eqCanvas.clientWidth;
+  const h = eqCanvas.clientHeight;
+  if (!w || !h) return; // the Music tab is hidden
+  if (eqCanvas.width !== Math.round(w * ratio) || eqCanvas.height !== Math.round(h * ratio)) {
+    eqCanvas.width = Math.round(w * ratio);
+    eqCanvas.height = Math.round(h * ratio);
+    eqCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+  eqCtx.clearRect(0, 0, w, h);
+  eqCtx.font = '11px "Outfit", system-ui, sans-serif';
+  eqCtx.textBaseline = "alphabetic";
+
+  // Grid
+  eqCtx.lineWidth = 1;
+  eqCtx.fillStyle = "rgba(255, 255, 255, 0.4)";
+  for (const hz of GRID_HZ) {
+    const x = Math.round(eqX(hz, w)) + 0.5;
+    eqCtx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+    eqCtx.beginPath();
+    eqCtx.moveTo(x, 0);
+    eqCtx.lineTo(x, h);
+    eqCtx.stroke();
+    if (hz === 100 || hz === 1000 || hz === 10000) eqCtx.fillText(hz >= 1000 ? `${hz / 1000}k` : String(hz), x + 4, h - 5);
+  }
+  for (const db of [-12, -6, 0, 6, 12]) {
+    const y = Math.round(eqY(db, h)) + 0.5;
+    eqCtx.strokeStyle = db === 0 ? "rgba(255, 255, 255, 0.25)" : "rgba(255, 255, 255, 0.07)";
+    eqCtx.beginPath();
+    eqCtx.moveTo(0, y);
+    eqCtx.lineTo(w, y);
+    eqCtx.stroke();
+    if (db !== 0) eqCtx.fillText(`${db > 0 ? "+" : ""}${db}`, 4, y - 3);
+  }
+
+  // Live spectrum behind the curve
+  if (analyser) {
+    const binHz = audioCtx.sampleRate / analyser.fftSize;
+    eqCtx.fillStyle = "rgba(255, 255, 255, 0.12)";
+    for (let x = 0; x < w; x += 3) {
+      const bin = Math.min(freqData.length - 1, Math.round(posToHz(x / w) / binHz));
+      const value = (freqData[bin] / 255) ** 1.4 * h * 0.7;
+      eqCtx.fillRect(x, h - value, 2, value);
+    }
+  }
+
+  // Combined response of all bands
+  const coeffs = eqBands.map(biquadCoeffs);
+  const zero = eqY(0, h);
+  eqCtx.beginPath();
+  for (let x = 0; x <= w; x += 2) {
+    const hz = posToHz(x / w);
+    const db = clamp(coeffs.reduce((sum, c) => sum + coeffsDb(c, hz), 0), -EQ_RANGE, EQ_RANGE);
+    if (x === 0) eqCtx.moveTo(x, eqY(db, h));
+    else eqCtx.lineTo(x, eqY(db, h));
+  }
+  eqCtx.strokeStyle = "#fff";
+  eqCtx.lineWidth = 2;
+  eqCtx.stroke();
+  eqCtx.lineTo(w, zero);
+  eqCtx.lineTo(0, zero);
+  eqCtx.closePath();
+  eqCtx.fillStyle = "rgba(255, 255, 255, 0.1)";
+  eqCtx.fill();
+
+  // Band points
+  eqCtx.textAlign = "center";
+  eqCtx.textBaseline = "middle";
+  eqBands.forEach((band, i) => {
+    const x = eqX(band.freq, w);
+    const y = eqY(band.gain, h);
+    const on = i === eqActive || i === dragging;
+    eqCtx.beginPath();
+    eqCtx.arc(x, y, on ? 10 : 8, 0, Math.PI * 2);
+    eqCtx.fillStyle = on ? "#fff" : "#07070a";
+    eqCtx.fill();
+    eqCtx.lineWidth = 1.5;
+    eqCtx.strokeStyle = "#fff";
+    eqCtx.stroke();
+    eqCtx.fillStyle = on ? "#07070a" : "#fff";
+    eqCtx.fillText(String(i + 1), x, y + 0.5);
+  });
+  eqCtx.textAlign = "start";
+};
+requestAnimationFrame(drawEq);
 
 // Start the player in its initial state
 renderPlaylist();
