@@ -7,6 +7,8 @@
   --violet: #a78bfa;
   --cyan: #67e8f9;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --accent-rgb: 255, 255, 255;
+  --bass: 0;
 }
 
 *,
@@ -64,6 +66,28 @@ body {
 
 .snow {
   z-index: 0;
+}
+
+/* Glows with the bass, in the visualizer color */
+.bg-pulse {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--bass);
+  background:
+    radial-gradient(ellipse 90% 55% at 50% 105%, rgba(var(--accent-rgb), 0.5), transparent 70%),
+    radial-gradient(ellipse 45% 80% at 100% 50%, rgba(var(--accent-rgb), 0.18), transparent 70%);
+}
+
+/* Pointer effects */
+.fx {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 /* Click to enter */
@@ -130,7 +154,8 @@ body {
   height: 100vh;
   background: rgba(7, 7, 10, 0.8);
   backdrop-filter: blur(16px);
-  border-right: 1px solid var(--line);
+  border-right: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--bass) * 0.5));
+  box-shadow: 10px 0 calc(var(--bass) * 40px) -14px rgba(var(--accent-rgb), calc(var(--bass) * 0.6));
 }
 
 .profile {
@@ -264,7 +289,7 @@ body {
 .panel-title {
   margin: 0 0 32px;
   padding-bottom: 20px;
-  border-bottom: 1px solid var(--line-strong);
+  border-bottom: 1px solid rgba(var(--accent-rgb), calc(0.3 + var(--bass) * 0.6));
   font-size: clamp(2.6rem, 6vw, 4.2rem);
   font-weight: 700;
   letter-spacing: -0.04em;
@@ -457,8 +482,88 @@ body {
   display: block;
   width: 100%;
   height: 180px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--bass) * 0.55));
   background: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 calc(var(--bass) * 46px) rgba(var(--accent-rgb), calc(var(--bass) * 0.55));
+}
+
+.viz-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 16px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.setting {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.setting-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.setting-val {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
+.setting input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #fff;
+}
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  cursor: pointer;
+}
+
+.swatch[aria-pressed="true"] {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.color-input {
+  width: 34px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  cursor: pointer;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.check input {
+  margin: 0;
+  accent-color: #fff;
 }
 
 .player {
@@ -467,8 +572,9 @@ body {
   align-items: center;
   gap: 22px;
   padding: 20px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--bass) * 0.4));
   background: rgba(255, 255, 255, 0.02);
+  box-shadow: 0 0 calc(var(--bass) * 36px) -6px rgba(var(--accent-rgb), calc(var(--bass) * 0.45));
 }
 
 .cover {
@@ -749,7 +855,7 @@ body {
   width: 100%;
   height: 220px;
   margin-top: 16px;
-  border: 1px solid var(--line);
+  border: 1px solid rgba(var(--accent-rgb), calc(0.12 + var(--bass) * 0.4));
   background: rgba(0, 0, 0, 0.4);
   touch-action: none;
 }

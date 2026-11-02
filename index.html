@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap">
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <noscript><style>.gate { display: none; }</style></noscript>
 </head>
 <body>
@@ -27,7 +27,9 @@
   </video>
   <div class="bg-image" aria-hidden="true"></div>
   <div class="bg-shade" aria-hidden="true"></div>
+  <div class="bg-pulse" id="bg-pulse" aria-hidden="true"></div>
   <canvas class="snow" id="snow" aria-hidden="true"></canvas>
+  <canvas class="fx" id="fx" aria-hidden="true"></canvas>
 
   <div class="layout">
     <aside class="sidebar">
@@ -153,6 +155,36 @@
           </div>
           <canvas class="viz" id="viz" role="img" aria-label="Audio visualizer"></canvas>
 
+          <div class="viz-settings" aria-label="Visualizer settings">
+            <label class="setting">
+              <span class="setting-head"><span>Speed</span><span class="setting-val" id="set-speed-val"></span></span>
+              <input id="set-speed" type="range" min="0.05" max="1" step="0.01" aria-label="Visualizer speed">
+            </label>
+            <label class="setting">
+              <span class="setting-head"><span>Smooth</span><span class="setting-val" id="set-smooth-val"></span></span>
+              <input id="set-smooth" type="range" min="0" max="0.95" step="0.01" aria-label="Visualizer smoothing">
+            </label>
+            <label class="setting">
+              <span class="setting-head"><span>Sensitivity</span><span class="setting-val" id="set-sens-val"></span></span>
+              <input id="set-sens" type="range" min="0.5" max="2" step="0.05" aria-label="Visualizer sensitivity">
+            </label>
+            <div class="setting">
+              <span class="setting-head"><span>Color</span></span>
+              <div class="swatches" id="swatches">
+                <input class="color-input" id="set-color" type="color" aria-label="Custom color">
+              </div>
+            </div>
+            <div class="setting">
+              <span class="setting-head"><span>Effects</span></span>
+              <label class="check"><input id="set-glow" type="checkbox"><span>Site reacts to bass</span></label>
+              <label class="check"><input id="set-cursor" type="checkbox"><span>Cursor effects</span></label>
+            </div>
+            <div class="setting">
+              <span class="setting-head"><span>&nbsp;</span></span>
+              <button class="mode" id="set-reset" type="button">Reset settings</button>
+            </div>
+          </div>
+
           <div class="player">
             <div class="cover" id="cover">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -211,6 +243,6 @@
     </main>
   </div>
 
-  <script src="script.js?v=3"></script>
+  <script src="script.js?v=4"></script>
 </body>
 </html>

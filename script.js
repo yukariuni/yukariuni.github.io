@@ -187,8 +187,8 @@ const vizCtx = vizCanvas.getContext("2d");
 const canVisualize = location.protocol === "http:" || location.protocol === "https:";
 if (!canVisualize) vizNote.textContent = "The visualizer works on the website, not when this file is opened directly.";
 
-const timeData = new Uint8Array(4096).fill(128);
-const freqData = new Uint8Array(2048);
+const timeData = new Uint8Array(8192).fill(128);
+const freqData = new Uint8Array(4096);
 
 // Parametric equalizer: 5 bands, each with a type, a frequency, a gain (dB) and a Q
 const EQ_DEFAULTS = [
@@ -242,8 +242,8 @@ const connectVisualizer = () => {
   limiter.release.value = 0.25;
 
   analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 4096;
-  analyser.smoothingTimeConstant = 0.8;
+  analyser.fftSize = 8192; // finer bass resolution
+  analyser.smoothingTimeConstant = settings.smooth;
   analyser.minDecibels = -90;
   analyser.maxDecibels = -10; // the bass no longer hits the ceiling
 
@@ -383,60 +383,216 @@ seekEl.addEventListener("input", () => {
 volumeEl.addEventListener("input", () => setVolume(Number(volumeEl.value)));
 volumeEl.value = String(DEFAULT_VOLUME);
 
-// Visualizer: several modes, all drawn in white
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// ---------- Visualizer settings (saved in the browser) ----------
+const SETTINGS_KEY = "yukari-visualizer";
+const SETTINGS_DEFAULTS = { speed: 0.5, smooth: 0.8, sens: 1, color: "#ffffff", glow: true, cursor: true, mode: "spectrum" };
+const settings = { ...SETTINGS_DEFAULTS };
+try {
+  Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}"));
+} catch {
+  // storage unavailable: the defaults are used
+}
+const saveSettings = () => {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // ignore
+  }
+};
+
+let accentRgb = "255, 255, 255";
+const rgba = (alpha) => `rgba(${accentRgb}, ${alpha})`;
+const hexToRgb = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
+};
+
+const SWATCHES = ["#ffffff", "#a78bfa", "#67e8f9", "#f472b6", "#4ade80", "#fb923c", "#f87171"];
+const swatchBox = $("swatches");
+const colorInput = $("set-color");
+const swatchButtons = SWATCHES.map((color) => {
+  const button = createNode("button", "swatch");
+  button.type = "button";
+  button.style.background = color;
+  button.dataset.color = color;
+  button.setAttribute("aria-label", `Color ${color}`);
+  button.addEventListener("click", () => setAccent(color));
+  swatchBox.insertBefore(button, colorInput);
+  return button;
+});
+
+// The color is the visualizer's, and also the glow around it
+function setAccent(hex) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) hex = SETTINGS_DEFAULTS.color;
+  settings.color = hex.toLowerCase();
+  accentRgb = hexToRgb(settings.color);
+  document.documentElement.style.setProperty("--accent-rgb", accentRgb);
+  colorInput.value = settings.color;
+  for (const button of swatchButtons) button.setAttribute("aria-pressed", String(button.dataset.color === settings.color));
+  saveSettings();
+}
+
+const bindSlider = (id, key, format, onChange) => {
+  const input = $(id);
+  const value = $(`${id}-val`);
+  const show = () => (value.textContent = format(Number(input.value)));
+  input.value = String(settings[key]);
+  show();
+  input.addEventListener("input", () => {
+    settings[key] = Number(input.value);
+    show();
+    if (onChange) onChange();
+    saveSettings();
+  });
+};
+const bindChecks = () => {
+  for (const [id, key] of [["set-glow", "glow"], ["set-cursor", "cursor"]]) {
+    const box = $(id);
+    box.checked = Boolean(settings[key]);
+    box.addEventListener("change", () => {
+      settings[key] = box.checked;
+      saveSettings();
+    });
+  }
+};
+
+const applySmooth = () => {
+  if (analyser) analyser.smoothingTimeConstant = settings.smooth;
+};
+bindSlider("set-speed", "speed", (v) => `${Math.round(v * 100)}%`);
+bindSlider("set-smooth", "smooth", (v) => `${Math.round((v / 0.95) * 100)}%`, applySmooth);
+bindSlider("set-sens", "sens", (v) => `${v.toFixed(2)}x`);
+bindChecks();
+colorInput.addEventListener("input", () => setAccent(colorInput.value));
+
+// ---------- Visualizer modes ----------
+const VIZ_MODE_NAMES = ["spectrum", "mirror", "area", "radial", "waveform"];
+if (!VIZ_MODE_NAMES.includes(settings.mode)) settings.mode = "spectrum";
+vizMode = settings.mode;
 const modeButtons = [...document.querySelectorAll("[data-viz]")];
+const showMode = () => {
+  for (const button of modeButtons) button.setAttribute("aria-pressed", String(button.dataset.viz === vizMode));
+};
 for (const button of modeButtons) {
   button.addEventListener("click", () => {
     vizMode = button.dataset.viz;
-    for (const other of modeButtons) other.setAttribute("aria-pressed", String(other === button));
+    settings.mode = vizMode;
+    showMode();
+    saveSettings();
   });
 }
+showMode();
 
-// Turns the spectrum into n bars on a log scale. Each bar gets its own FFT bins (the bass used to share
-// the same bin, which made the first bars identical, and it hit the ceiling, which made them flat squares).
-const bandValues = new Float32Array(128);
-const getBands = (n) => {
-  const binHz = analyser ? audioCtx.sampleRate / analyser.fftSize : 10.77;
-  const minBin = Math.max(1, Math.round(30 / binHz));
-  const maxBin = Math.min(freqData.length - 1, Math.round(16000 / binHz));
-  let start = minBin;
-  for (let i = 0; i < n; i++) {
-    const edge = Math.round(minBin * (maxBin / minBin) ** ((i + 1) / n));
-    const end = Math.min(freqData.length, Math.max(start + 1, edge));
-    let peak = 0;
-    for (let b = start; b < end; b++) if (freqData[b] > peak) peak = freqData[b];
-    start = Math.min(end, freqData.length - 1);
-    const tilt = 0.8 + 0.4 * (i / n); // the bass is naturally louder, so it is lowered a little
-    bandValues[i] = Math.min(1, (peak / 255) ** 1.4 * tilt);
+$("set-reset").addEventListener("click", () => {
+  Object.assign(settings, SETTINGS_DEFAULTS);
+  for (const [id, key] of [["set-speed", "speed"], ["set-smooth", "smooth"], ["set-sens", "sens"]]) {
+    $(id).value = String(settings[key]);
+    $(id).dispatchEvent(new Event("input"));
   }
-  return bandValues;
+  $("set-glow").checked = settings.glow;
+  $("set-cursor").checked = settings.cursor;
+  vizMode = settings.mode;
+  showMode();
+  setAccent(settings.color);
+});
+
+// ---------- Analysis: smooth bands, no blocky bass ----------
+// The spectrum is read with interpolation between FFT bins (the old version showed the same bin as a big flat block
+// in the bass), then eased over time using the Speed setting.
+const BAND_COUNT = 96;
+const BAND_MIN_HZ = 25;
+const BAND_MAX_HZ = 16000;
+const BASS_BANDS = 27; // roughly 25 to 150 Hz
+const bandEdges = Float32Array.from({ length: BAND_COUNT + 1 }, (_, i) => BAND_MIN_HZ * (BAND_MAX_HZ / BAND_MIN_HZ) ** (i / BAND_COUNT));
+const bands = new Float32Array(BAND_COUNT);
+const bandOut = new Float32Array(BAND_COUNT);
+let bassLevel = 0;
+let bassSlow = 0;
+
+const sampleSpectrum = (hz) => {
+  const position = hz / (audioCtx.sampleRate / analyser.fftSize);
+  const index = Math.min(freqData.length - 2, Math.floor(position));
+  const t = Math.min(1, position - index);
+  return (freqData[index] + (freqData[index + 1] - freqData[index]) * t) / 255;
 };
 
+const updateBands = (dt) => {
+  const rise = 0.25 + 0.75 * settings.speed;
+  const fall = 0.03 + 0.5 * settings.speed ** 2;
+  const frames = Math.min(4, dt * 60);
+  for (let i = 0; i < BAND_COUNT; i++) {
+    let target = 0;
+    if (analyser) {
+      const lo = bandEdges[i];
+      const hi = bandEdges[i + 1];
+      const peak = Math.max(sampleSpectrum(lo), sampleSpectrum(Math.sqrt(lo * hi)), sampleSpectrum(hi));
+      const tilt = 0.7 + 0.5 * (i / BAND_COUNT); // the bass is naturally much louder
+      target = Math.min(1, (peak * settings.sens) ** 1.4 * tilt);
+    }
+    const rate = target > bands[i] ? rise : fall;
+    bands[i] += (target - bands[i]) * (1 - (1 - rate) ** frames);
+  }
+
+  // Bass level for the glow: the loudness of the low bands plus a boost on sudden hits
+  let sum = 0;
+  for (let i = 0; i < BASS_BANDS; i++) sum += bands[i];
+  const average = sum / BASS_BANDS;
+  bassSlow += (average - bassSlow) * Math.min(1, dt * 1.5);
+  const target = Math.min(1, average * 0.6 + Math.max(0, average - bassSlow) * 3);
+  const bassRate = target > bassLevel ? 0.5 : 0.12;
+  bassLevel += (target - bassLevel) * (1 - (1 - bassRate) ** frames);
+};
+
+// Groups the 96 bands into n bars
+const bandsFor = (n) => {
+  for (let i = 0; i < n; i++) {
+    const lo = Math.floor((i * BAND_COUNT) / n);
+    const hi = Math.max(lo + 1, Math.floor(((i + 1) * BAND_COUNT) / n));
+    let peak = 0;
+    for (let b = lo; b < hi; b++) if (bands[b] > peak) peak = bands[b];
+    bandOut[i] = peak;
+  }
+  return bandOut;
+};
+
+// The site reacts to the bass through the --bass CSS variable
+const pulseTargets = [$("bg-pulse"), musicEl, panelTitle, document.querySelector(".sidebar")];
+let lastPulse = -1;
+const applyPulse = () => {
+  const value = settings.glow ? bassLevel : 0;
+  if (Math.abs(value - lastPulse) < 0.008) return;
+  lastPulse = value;
+  for (const element of pulseTargets) element.style.setProperty("--bass", value.toFixed(3));
+};
+
+// ---------- Drawing ----------
 const drawSpectrum = (w, h) => {
   const bars = Math.min(64, Math.floor(w / 10));
-  const values = getBands(bars);
+  const values = bandsFor(bars);
   const barWidth = w / bars;
   for (let i = 0; i < bars; i++) {
     const barHeight = Math.max(2, values[i] * h);
-    vizCtx.fillStyle = `rgba(255, 255, 255, ${0.3 + values[i] * 0.7})`;
+    vizCtx.fillStyle = rgba(0.3 + values[i] * 0.7);
     vizCtx.fillRect(i * barWidth + 1, h - barHeight, Math.max(1, barWidth - 3), barHeight);
   }
 };
 
 const drawMirror = (w, h) => {
   const bars = Math.min(64, Math.floor(w / 10));
-  const values = getBands(bars);
+  const values = bandsFor(bars);
   const barWidth = w / bars;
   for (let i = 0; i < bars; i++) {
     const barHeight = Math.max(2, values[i] * h * 0.92);
-    vizCtx.fillStyle = `rgba(255, 255, 255, ${0.3 + values[i] * 0.7})`;
+    vizCtx.fillStyle = rgba(0.3 + values[i] * 0.7);
     vizCtx.fillRect(i * barWidth + 1, (h - barHeight) / 2, Math.max(1, barWidth - 3), barHeight);
   }
 };
 
 const drawArea = (w, h) => {
-  const count = 48;
-  const values = getBands(count);
+  const count = 96;
+  const values = bandsFor(count);
   const step = w / (count - 1);
   const pts = Array.from({ length: count }, (_, i) => [i * step, h - Math.max(2, values[i] * h * 0.95)]);
   vizCtx.beginPath();
@@ -447,14 +603,15 @@ const drawArea = (w, h) => {
     vizCtx.quadraticCurveTo(px, py, (px + cx) / 2, (py + cy) / 2);
   }
   vizCtx.lineTo(w, pts[count - 1][1]);
+  vizCtx.strokeStyle = rgba(1);
   vizCtx.lineWidth = 2;
   vizCtx.stroke();
   vizCtx.lineTo(w, h);
   vizCtx.lineTo(0, h);
   vizCtx.closePath();
   const fade = vizCtx.createLinearGradient(0, 0, 0, h);
-  fade.addColorStop(0, "rgba(255, 255, 255, 0.5)");
-  fade.addColorStop(1, "rgba(255, 255, 255, 0.02)");
+  fade.addColorStop(0, rgba(0.5));
+  fade.addColorStop(1, rgba(0.02));
   vizCtx.fillStyle = fade;
   vizCtx.fill();
 };
@@ -462,15 +619,15 @@ const drawArea = (w, h) => {
 const drawRadial = (w, h) => {
   const half = 48;
   const total = half * 2;
-  const values = getBands(half);
+  const values = bandsFor(half);
   const size = Math.min(w, h);
   const cx = w / 2;
   const cy = h / 2;
-  const base = size * 0.2;
+  const base = size * 0.2 + bassLevel * size * 0.03;
   const reach = size * 0.26;
   vizCtx.lineWidth = 2.5;
   vizCtx.lineCap = "round";
-  vizCtx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+  vizCtx.strokeStyle = rgba(0.15 + bassLevel * 0.4);
   vizCtx.beginPath();
   vizCtx.arc(cx, cy, base - 4, 0, Math.PI * 2);
   vizCtx.stroke();
@@ -480,7 +637,7 @@ const drawRadial = (w, h) => {
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
     const length = 2 + value * reach;
-    vizCtx.strokeStyle = `rgba(255, 255, 255, ${0.3 + value * 0.7})`;
+    vizCtx.strokeStyle = rgba(0.3 + value * 0.7);
     vizCtx.beginPath();
     vizCtx.moveTo(cx + cos * base, cy + sin * base);
     vizCtx.lineTo(cx + cos * (base + length), cy + sin * (base + length));
@@ -489,11 +646,12 @@ const drawRadial = (w, h) => {
 };
 
 const drawWaveform = (w, h) => {
+  vizCtx.strokeStyle = rgba(1);
   vizCtx.lineWidth = 2;
   vizCtx.beginPath();
-  for (let i = 0; i < timeData.length; i += 2) {
+  for (let i = 0; i < timeData.length; i += 4) {
     const x = (i / (timeData.length - 1)) * w;
-    const y = (timeData[i] / 255) * h;
+    const y = clamp(h / 2 + ((timeData[i] - 128) / 128) * (h / 2) * settings.sens, 0, h);
     if (i === 0) vizCtx.moveTo(x, y);
     else vizCtx.lineTo(x, y);
   }
@@ -502,8 +660,20 @@ const drawWaveform = (w, h) => {
 
 const VIZ_DRAWERS = { spectrum: drawSpectrum, mirror: drawMirror, area: drawArea, radial: drawRadial, waveform: drawWaveform };
 
-const drawVisualizer = () => {
+let lastFrame = performance.now();
+const drawVisualizer = (now = performance.now()) => {
   requestAnimationFrame(drawVisualizer);
+  const dt = Math.min(0.1, (now - lastFrame) / 1000);
+  lastFrame = now;
+
+  // Analysis and the site's bass glow run on every tab, drawing only when the Music tab is visible
+  if (analyser) {
+    analyser.getByteTimeDomainData(timeData);
+    analyser.getByteFrequencyData(freqData);
+  }
+  updateBands(dt);
+  applyPulse();
+
   const ratio = window.devicePixelRatio || 1;
   const w = vizCanvas.clientWidth;
   const h = vizCanvas.clientHeight;
@@ -513,13 +683,7 @@ const drawVisualizer = () => {
     vizCanvas.height = Math.round(h * ratio);
     vizCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
   }
-  if (analyser) {
-    analyser.getByteTimeDomainData(timeData);
-    analyser.getByteFrequencyData(freqData);
-  }
   vizCtx.clearRect(0, 0, w, h);
-  vizCtx.fillStyle = "#fff";
-  vizCtx.strokeStyle = "#fff";
   (VIZ_DRAWERS[vizMode] || drawSpectrum)(w, h);
 };
 requestAnimationFrame(drawVisualizer);
@@ -535,7 +699,6 @@ $("eq-note").textContent = canVisualize
 
 const hzToPos = (hz) => Math.log(hz / EQ_MIN_HZ) / Math.log(EQ_MAX_HZ / EQ_MIN_HZ);
 const posToHz = (pos) => EQ_MIN_HZ * (EQ_MAX_HZ / EQ_MIN_HZ) ** pos;
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const formatHz = (hz) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 1 : 2).replace(/\.?0+$/, "")} kHz` : `${Math.round(hz)} Hz`);
 const formatDb = (db) => `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
 
@@ -762,10 +925,10 @@ const drawEq = () => {
 
   // Grid
   eqCtx.lineWidth = 1;
-  eqCtx.fillStyle = "rgba(255, 255, 255, 0.4)";
+  eqCtx.fillStyle = rgba(0.4);
   for (const hz of GRID_HZ) {
     const x = Math.round(eqX(hz, w)) + 0.5;
-    eqCtx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+    eqCtx.strokeStyle = rgba(0.07);
     eqCtx.beginPath();
     eqCtx.moveTo(x, 0);
     eqCtx.lineTo(x, h);
@@ -774,7 +937,7 @@ const drawEq = () => {
   }
   for (const db of [-12, -6, 0, 6, 12]) {
     const y = Math.round(eqY(db, h)) + 0.5;
-    eqCtx.strokeStyle = db === 0 ? "rgba(255, 255, 255, 0.25)" : "rgba(255, 255, 255, 0.07)";
+    eqCtx.strokeStyle = db === 0 ? rgba(0.25) : rgba(0.07);
     eqCtx.beginPath();
     eqCtx.moveTo(0, y);
     eqCtx.lineTo(w, y);
@@ -782,15 +945,18 @@ const drawEq = () => {
     if (db !== 0) eqCtx.fillText(`${db > 0 ? "+" : ""}${db}`, 4, y - 3);
   }
 
-  // Live spectrum behind the curve
+  // Live spectrum behind the curve, drawn as a smooth shape
   if (analyser) {
-    const binHz = audioCtx.sampleRate / analyser.fftSize;
-    eqCtx.fillStyle = "rgba(255, 255, 255, 0.12)";
-    for (let x = 0; x < w; x += 3) {
-      const bin = Math.min(freqData.length - 1, Math.round(posToHz(x / w) / binHz));
-      const value = (freqData[bin] / 255) ** 1.4 * h * 0.7;
-      eqCtx.fillRect(x, h - value, 2, value);
+    eqCtx.beginPath();
+    eqCtx.moveTo(0, h);
+    for (let x = 0; x <= w; x += 2) {
+      const value = clamp((sampleSpectrum(posToHz(x / w)) * settings.sens) ** 1.4, 0, 1) * h * 0.7;
+      eqCtx.lineTo(x, h - value);
     }
+    eqCtx.lineTo(w, h);
+    eqCtx.closePath();
+    eqCtx.fillStyle = rgba(0.14);
+    eqCtx.fill();
   }
 
   // Combined response of all bands
@@ -803,13 +969,13 @@ const drawEq = () => {
     if (x === 0) eqCtx.moveTo(x, eqY(db, h));
     else eqCtx.lineTo(x, eqY(db, h));
   }
-  eqCtx.strokeStyle = "#fff";
+  eqCtx.strokeStyle = rgba(1);
   eqCtx.lineWidth = 2;
   eqCtx.stroke();
   eqCtx.lineTo(w, zero);
   eqCtx.lineTo(0, zero);
   eqCtx.closePath();
-  eqCtx.fillStyle = "rgba(255, 255, 255, 0.1)";
+  eqCtx.fillStyle = rgba(0.1);
   eqCtx.fill();
 
   // Band points
@@ -821,17 +987,135 @@ const drawEq = () => {
     const on = i === eqActive || i === dragging;
     eqCtx.beginPath();
     eqCtx.arc(x, y, on ? 10 : 8, 0, Math.PI * 2);
-    eqCtx.fillStyle = on ? "#fff" : "#07070a";
+    eqCtx.fillStyle = on ? rgba(1) : "#07070a";
     eqCtx.fill();
     eqCtx.lineWidth = 1.5;
-    eqCtx.strokeStyle = "#fff";
+    eqCtx.strokeStyle = rgba(1);
     eqCtx.stroke();
-    eqCtx.fillStyle = on ? "#07070a" : "#fff";
+    eqCtx.fillStyle = on ? "#07070a" : rgba(1);
     eqCtx.fillText(String(i + 1), x, y + 0.5);
   });
   eqCtx.textAlign = "start";
 };
 requestAnimationFrame(drawEq);
+
+// Pointer effects: a ring that follows the cursor, a pixel trail, and a burst when you click
+const fxCanvas = $("fx");
+const fxCtx = fxCanvas.getContext("2d");
+if (!reduceMotion) {
+  let fxW = 0;
+  let fxH = 0;
+  const resizeFx = () => {
+    const ratio = window.devicePixelRatio || 1;
+    fxW = innerWidth;
+    fxH = innerHeight;
+    fxCanvas.width = fxW * ratio;
+    fxCanvas.height = fxH * ratio;
+    fxCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  };
+  addEventListener("resize", resizeFx);
+  resizeFx();
+
+  const pointer = { x: 0, y: 0, ringX: 0, ringY: 0, radius: 14, active: false, hover: false, down: false };
+  const particles = [];
+  const ripples = [];
+  const INTERACTIVE = "a, button, input, select, label, canvas, [role='tab']";
+  const rand = (min, max) => min + Math.random() * (max - min);
+
+  addEventListener("pointermove", (event) => {
+    if (!settings.cursor || event.pointerType === "touch") return;
+    if (!pointer.active) {
+      pointer.ringX = event.clientX;
+      pointer.ringY = event.clientY;
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+    }
+    const distance = Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y);
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+    pointer.active = true;
+    pointer.hover = Boolean(event.target.closest && event.target.closest(INTERACTIVE));
+    const count = Math.min(3, Math.floor(distance / 14) + (Math.random() < 0.15 ? 1 : 0));
+    for (let i = 0; i < count && particles.length < 300; i++) {
+      const life = rand(0.5, 1);
+      particles.push({ x: pointer.x + rand(-3, 3), y: pointer.y + rand(-3, 3), vx: rand(-25, 25), vy: rand(-10, 35), size: rand(2, 4.5), life, max: life });
+    }
+  });
+
+  addEventListener("pointerdown", (event) => {
+    if (!settings.cursor) return;
+    pointer.down = true;
+    for (let i = 0; i < 16 && particles.length < 300; i++) {
+      const angle = (i / 16) * Math.PI * 2 + rand(-0.2, 0.2);
+      const speed = rand(80, 260);
+      const life = rand(0.5, 0.9);
+      particles.push({ x: event.clientX, y: event.clientY, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed, size: rand(2.5, 5), life, max: life });
+    }
+    ripples.push({ x: event.clientX, y: event.clientY, radius: 6, life: 0.6, max: 0.6 });
+  });
+  addEventListener("pointerup", () => (pointer.down = false));
+  document.documentElement.addEventListener("mouseleave", () => (pointer.active = false));
+
+  let fxLast = performance.now();
+  const drawFx = (now = performance.now()) => {
+    requestAnimationFrame(drawFx);
+    const dt = Math.min(0.05, (now - fxLast) / 1000);
+    fxLast = now;
+    fxCtx.clearRect(0, 0, fxW, fxH);
+    if (!settings.cursor) {
+      particles.length = 0;
+      ripples.length = 0;
+      return;
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0) {
+        particles.splice(i, 1);
+        continue;
+      }
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.97;
+      p.vy *= 0.97;
+      fxCtx.fillStyle = rgba((p.life / p.max) * 0.9);
+      fxCtx.fillRect(p.x, p.y, p.size, p.size);
+    }
+
+    fxCtx.lineWidth = 1.5;
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.life -= dt;
+      if (r.life <= 0) {
+        ripples.splice(i, 1);
+        continue;
+      }
+      r.radius += 150 * dt;
+      fxCtx.strokeStyle = rgba((r.life / r.max) * 0.7);
+      fxCtx.beginPath();
+      fxCtx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+      fxCtx.stroke();
+    }
+
+    if (pointer.active) {
+      pointer.ringX += (pointer.x - pointer.ringX) * (1 - Math.exp(-dt * 16));
+      pointer.ringY += (pointer.y - pointer.ringY) * (1 - Math.exp(-dt * 16));
+      const targetRadius = pointer.down ? 9 : pointer.hover ? 26 : 14;
+      pointer.radius += (targetRadius - pointer.radius) * (1 - Math.exp(-dt * 14));
+      const glow = fxCtx.createRadialGradient(pointer.ringX, pointer.ringY, 0, pointer.ringX, pointer.ringY, pointer.radius * 3);
+      glow.addColorStop(0, rgba(0.14 + bassLevel * 0.2));
+      glow.addColorStop(1, rgba(0));
+      fxCtx.fillStyle = glow;
+      fxCtx.fillRect(pointer.ringX - pointer.radius * 3, pointer.ringY - pointer.radius * 3, pointer.radius * 6, pointer.radius * 6);
+      fxCtx.strokeStyle = rgba(0.8);
+      fxCtx.beginPath();
+      fxCtx.arc(pointer.ringX, pointer.ringY, pointer.radius, 0, Math.PI * 2);
+      fxCtx.stroke();
+    }
+  };
+  requestAnimationFrame(drawFx);
+}
 
 // Start the player in its initial state
 renderPlaylist();
@@ -841,3 +1125,5 @@ if (hasTracks) {
   showTrack(0);
   markCurrent();
 }
+
+setAccent(settings.color);
